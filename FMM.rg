@@ -150,7 +150,7 @@ do
 
   var icurr : int3d = {0, 0, 0}
   var i : int32 = 0
-  for lvl = num_lvl, -1, 1 do
+  for lvl = 0, num_lvl do
     -- Index of child cell containing point
     var icell : uint32 = int(x > ctr._1)
     var jcell : uint32 = int(y > ctr._2)
@@ -304,6 +304,15 @@ do
 
 end
 
+task M2M(r_particles : region(Particle),
+         r_boxes     : region(ispace(int3d, box_per_dim), Box),
+         num_lvl     : uint64)
+where
+  reads writes(r_particles, r_boxes)
+do
+
+end
+
 task dump_forces(r_particles : region(Particle),
                  filename : int8[512])
 where
@@ -340,9 +349,7 @@ task toplevel()
   var ts_stop_init = c.legion_get_current_time_in_micros()
   c.printf("Particle initialization took %.4f sec\n", (ts_stop_init - ts_start_init) * 1e-6)
 
-  --
-  -- Begin FMM
-  --
+  -- Setup variables for tree structure
   var ts_start_ilist = c.legion_get_current_time_in_micros()
 
   -- Calculate center and size of largest box
@@ -386,6 +393,11 @@ task toplevel()
 
   var ts_stop_ilist = c.legion_get_current_time_in_micros()
   c.printf("Interaction list setup took %.4f sec\n", (ts_stop_ilist - ts_start_ilist) * 1e-6)
+
+  -- Upward pass
+  M2M(r_particles, r_boxes, num_lvl)
+
+  -- Downward pass
 
 --  c.printf("Force calculation took %.4f sec\n", (ts_stop_forces - ts_start_forces) * 1e-6)
 
