@@ -26,7 +26,7 @@ fspace Particle {
   pos      : Vector3d; -- Position vector
   vel      : Vector3d; -- Velocity vector
   force    : Vector3d; -- Force vector
-  field    : double; -- Value of field
+  field    : Vector3d; -- Field vector
 }
 
 terra skip_header(f : &c.FILE)
@@ -78,7 +78,7 @@ do
   -- Set initial force and field to 0
   for particle in r_particles do
     particle.force = Vector3d {0.0, 0.0, 0.0}
-    particle.field = 0.0
+    particle.field = Vector3d {0.0, 0.0, 0.0}
   end
 
   var f = c.fopen(filename, "rb")
@@ -105,8 +105,9 @@ where
 do
   var f = c.fopen(filename,"w")
   for particle in r_particles do
-    c.fprintf(f, "%f %f %f %f\n",
-          particle.field, particle.force._1, particle.force._2, particle.force._3)
+    c.fprintf(f, "%f %f %f %f %f %f\n",
+          particle.field._1, particle.field._2, particle.field._3,
+          particle.force._1, particle.force._2, particle.force._3)
   end
   c.fclose(f)
 end
@@ -138,18 +139,18 @@ task toplevel()
   var ts_start_forces = c.legion_get_current_time_in_micros()
   var i : uint8 = 0
   for particle1 in r_particles do
-    particle1.field = 0.0
+    --particle1.field = 0.0
     for particle2 in r_particles do
       if particle1 ~= particle2 then
         var r : Vector3d = particle2.pos - particle1.pos
         var kern : double = r:kfun()
-        particle1.field = particle1.field + particle2.q * kern
-        particle1.force = particle1.force +
-                          r * particle1.q * particle2.q * cmath.pow(kern,3)
+        var field_new : Vector3d = r * particle2.q * cmath.pow(kern,3)
+        particle1.field = particle1.field + field_new
+        particle1.force = particle1.force + field_new * particle1.q
       end
     end
   end
-  
+
   var ts_stop_forces = c.legion_get_current_time_in_micros()
   c.printf("Force calculation took %.4f sec\n", (ts_stop_forces - ts_start_forces) * 1e-6)
 

@@ -46,7 +46,9 @@ fspace Box {
   num_part   : int32;      -- Number of particles in box
   ctr        : Vector3d;   -- Box center
   S          : double;     -- Box side length
-  phi        : double;     -- Potential
+  phi        : double;     -- p-term multipole expansion due to particles in box
+  psi        : double;     -- p-term multipole expansion due to interaction list
+  psi_tilde  : double;     --
 }
 
 terra skip_header(f : &c.FILE)
@@ -304,12 +306,32 @@ do
 
 end
 
+task P2M(r_particles : region(Particle)
+         r_boxes     : region(ispace(int3d, box_per_dim), Box),
+         particle    : ptr(Particle,r_particles),
+         lvl         : uint64,
+         p           : uint64)
+where
+
+do
+
+end
+
 task M2M(r_particles : region(Particle),
          r_boxes     : region(ispace(int3d, box_per_dim), Box),
-         num_lvl     : uint64)
+         num_lvl     : uint64,
+         p           : uint64)
 where
   reads writes(r_particles, r_boxes)
 do
+  -- Form multipole expansions of potential field due to particles in each box
+  -- about the box center at the finest mesh level
+  var lvl : uint64 = num_lvl
+  var num_boxes_lvl : uint64 = cmath.pow(2,lvl)
+  for particle in r_particles do
+    var phi : double = P2M(r_particles, r_boxes, particle, lvl, num_boxes_lvl, p)
+    r_boxes[particle.box[lvl]].phi = r_boxes[particle.box[lvl]].phi + phi
+  end
 
 end
 
@@ -395,7 +417,7 @@ task toplevel()
   c.printf("Interaction list setup took %.4f sec\n", (ts_stop_ilist - ts_start_ilist) * 1e-6)
 
   -- Upward pass
-  M2M(r_particles, r_boxes, num_lvl)
+  M2M(r_particles, r_boxes, num_lvl, p)
 
   -- Downward pass
 
