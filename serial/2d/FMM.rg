@@ -45,12 +45,13 @@ fspace Box {
   num_part   : int32;      -- Number of particles in box
   ctr        : Vector2d;   -- Box center
   S          : double;     -- Box side length
-  phi        : Vector2d;   -- p-term multipole expansion due to particles in box
-  psi        : Vector2d;   -- p-term expansion due to interaction list
-  psi_tilde  : Vector2d;   -- p-term local expansion due to particles in parent's
+  --phi        : Vector2d;   -- p-term multipole expansion due to particles in box
+  --psi        : Vector2d;   -- p-term expansion due to interaction list
+  --psi_tilde  : Vector2d;   -- p-term local expansion due to particles in parent's
                            -- interaction list
   a_0        : double;     -- Coefficient in multipole expansion
   a_k        : Vector2d[4]; -- Coefficient in multipole expansion
+  b_l        : Vector2d[4]; -- Coefficient in local expansion
 }
 
 terra skip_header(f : &c.FILE)
@@ -103,20 +104,39 @@ terra well_separated(S : double, r : Vector2d)
   end
 end
 
-terra vec_mul(vec1 : Vector2d, vec2 : Vector2d)
+terra comp_mul(vec1 : Vector2d, vec2 : Vector2d)
   return Vector2d {vec1._1 * vec2._1 - vec1._2 * vec2._2,
                    vec1._1 * vec2._2 + vec1._2 * vec2._1}
 end
 
-terra vec_pow(vec : Vector2d, k : uint64)
+terra comp_pow(vec : Vector2d, k : int64)
   var tmp1 : Vector2d = vec
   var tmp2 : Vector2d
+  var kk : int64
+  if k < 0 then
+    kk = -1
+  else
+    kk = 1
+  end
+
   for i = 0, k do
     tmp2 = Vector2d {vec._1 * tmp1._1 - vec._2 * tmp1._2,
                      vec._1 * tmp1._2 + vec._2 * tmp1._1}
     tmp1 = tmp2
   end
+
+  if kk < 1 then
+    tmp1 = comp_mul(Vector2d {tmp2._1, -tmp2._2}, Vector2d {tmp2._1, -tmp2._2})
+    tmp2 = comp_mul(Vector2d {1.0, 0.0}, Vector2d {tmp2._1, -tmp2._2})
+    tmp2 = Vector2d {tmp2._1 / tmp1._1, tmp2._2 / tmp1._1}
+  end
+
   return tmp2
+end
+
+terra comp_log(vec : Vector2d)
+  return Vector2d {cmath.log(cmath.pow(vec._1,2) +cmath.pow(vec._1,2)),
+                   cmath.atan(vec._2/vec._1)}
 end
 
 terra factorial(n : uint64)
@@ -169,7 +189,9 @@ task create_tree(num_lvl     : uint64,
                  ctr         : Vector2d,
                  S           : double)
 where
-  reads writes(r_particles, r_boxes)
+  reads(r_boxes, r_particles.pos, r_particles.boxes, r_particles.id),
+  writes(r_particles.boxes, r_boxes.Children, r_boxes.Parent, r_boxes.ctr,
+         r_boxes.S, r_boxes.num_child)
 do
   var x : double = particle.pos._1
   var y : double = particle.pos._2
@@ -225,7 +247,7 @@ end
 task create_neighb(r_boxes : region(ispace(int2d, box_per_dim_i2d), Box),
                    num_lvl : uint64)
 where
-  reads writes(r_boxes)
+  reads writes(r_boxes.num_neighb, r_boxes.neighb)
 do
   for lvl = 1,num_lvl do
   var box_per_dim_lvl : uint64 = cmath.pow(2,lvl)
@@ -310,11 +332,13 @@ do
   fill(r_boxes.num_part, 0)
   fill(r_boxes.num_child, 0)
   fill(r_boxes.num_neighb, 0)
+  fill(r_boxes.num_ilist, 0)
   fill(r_boxes.Parent, {-1, -1})
-  fill(r_boxes.phi, {0.0, 0.0})
-  fill(r_boxes.psi, {0.0, 0.0})
-  fill(r_boxes.psi_tilde, {0.0, 0.0})
+  --fill(r_boxes.phi, {0.0, 0.0})
+  --fill(r_boxes.psi, {0.0, 0.0})
+  --fill(r_boxes.psi_tilde, {0.0, 0.0})
   fill(r_boxes.a_k, a_k_init)
+  fill(r_boxes.b_l, a_k_init)
   -- Create FMM tree
   for particle in r_particles do
     create_tree(num_lvl, r_particles, r_boxes, particle, ctr, S)
@@ -328,36 +352,34 @@ do
 
 end
 
-task P2M(r_particles   : region(Particle),
-         r_boxes       : region(ispace(int2d, box_per_dim_i2d), Box),
-         particle      : ptr(Particle,r_particles),
-         lvl           : uint64,
-         box_per_dim_lvl : uint64,
-         p             : uint64)
+task P2M(r_particles : region(Particle),
+         r_boxes     : region(ispace(int2d, box_per_dim_i2d), Box),
+         particle    : ptr(Particle,r_particles),
+         lvl         : uint64,
+         p           : uint64)
 where
-  reads writes(r_particles, r_boxes)
+  reads(r_particles.q, r_particles.pos, r_particles.boxes, r_boxes),
+  writes(r_boxes.a_k, r_boxes.a_0)
 do
   var ds : Vector2d = particle.pos - r_boxes[particle.boxes[lvl]].ctr
 
   if ds._1 ~= 0.0 or ds._2 ~= 0.0 then
     var a_k : Vector2d
-    --phi = particle.q * phi
-    for k = 0, p do
-      a_k = -1/k * particle.q * vec_pow(ds,k)
+    for k = 1, p do
+      a_k = -1/k * particle.q * comp_pow(ds,k)
       r_boxes[particle.boxes[lvl]].a_k[k] = r_boxes[particle.boxes[lvl]].a_k[k] + a_k
     end
-    r_boxes[particle.boxes[lvl]].a_0 = r_boxes[particle.boxes[lvl]].a_0
-                                       + particle.q
-    return
+    r_boxes[particle.boxes[lvl]].a_k[0] = r_boxes[particle.boxes[lvl]].a_k[0]
+                                       + Vector2d {particle.q, 0.0}
   end
 
 end
 
 task outgoing_translation(r_boxes : region(ispace(int2d, box_per_dim_i2d), Box),
-                          box_id : int2d,
+                          box_id  : int2d,
                           p       : uint64)
 where
-  reads writes(r_boxes)
+  reads(r_boxes), writes(r_boxes.a_k)
 do
   for k = 0, p do
     if k == 0 then
@@ -370,17 +392,61 @@ do
         var d : Vector2d = r_boxes[r_boxes[box_id].Children[j]].ctr
                            - r_boxes[box_id].ctr
         var a_sig : Vector2d = r_boxes[r_boxes[box_id].Children[j]].a_k[0]
-        r_boxes[box_id].a_k[k] = r_boxes[box_id].a_k[k] - 1/k * vec_mul(d,a_sig)
+        r_boxes[box_id].a_k[k] = r_boxes[box_id].a_k[k] - 1/k * comp_mul(d,a_sig)
         for i = 1, k do
           var ch_pq : int64 = choose(k,i)
           a_sig = r_boxes[r_boxes[box_id].Children[j]].a_k[i]
           r_boxes[box_id].a_k[k] = r_boxes[box_id].a_k[k]
-                                   + ch_pq * vec_mul(vec_pow(d, k - i), a_sig)
+                                   + ch_pq * comp_mul(comp_pow(d, k - i), a_sig)
         end
       end
     end
   end
 end
+
+task incoming_translation(r_boxes : region(ispace(int2d, box_per_dim_i2d), Box),
+                          box_id  : int2d,
+                          p       : uint64)
+where
+  reads(r_boxes), writes(r_boxes.b_l)
+do
+  if r_boxes[box_id].num_ilist > 0 then
+
+  for l = 0, p do
+    if l == 0 then
+      for j = 0, r_boxes[box_id].num_ilist do
+        var box_ilist = r_boxes[r_boxes[box_id].Ilist[j]]
+        var d : Vector2d =  box_ilist.ctr - r_boxes[box_id].ctr
+        r_boxes[box_id].b_l[l] = r_boxes[box_id].b_l[l]
+                                 + comp_mul(box_ilist.a_k[0],
+                                   comp_log(Vector2d {-d._1, -d._2}))
+        for k = 1, p do
+          r_boxes[box_id].b_l[l] = r_boxes[box_id].b_l[l]
+                                   + cmath.pow(-1,k)
+                                   * comp_mul(comp_pow(d, -k), box_ilist.a_k[k])
+        end
+      end
+    else
+    for j = 0, r_boxes[box_id].num_ilist do
+      var box_ilist = r_boxes[r_boxes[box_id].Ilist[j]]
+      var d : Vector2d =  r_boxes[box_id].ctr - box_ilist.ctr
+
+      var b_new : Vector2d = -1/l *box_ilist.a_k[0]
+      for k = 1, p do
+        var ch_pq : int64 = choose(l+k,k)
+        b_new = b_new + ch_pq * cmath.pow(-1,k)
+                * comp_mul(box_ilist.a_k[k], comp_pow(d,-k))
+      end
+      r_boxes[box_id].b_l[l] = r_boxes[box_id].b_l[l]
+                               + comp_mul(b_new, comp_pow(d,-l))
+
+    end
+    end
+  end
+
+  end
+end
+
 
 task M2M(r_particles : region(Particle),
          r_boxes     : region(ispace(int2d, box_per_dim_i2d), Box),
@@ -388,22 +454,20 @@ task M2M(r_particles : region(Particle),
          box_per_dim : uint64,
          p           : uint64)
 where
-  reads writes(r_particles, r_boxes)
+  reads(r_particles, r_boxes), writes(r_boxes)
 do
   -- Form multipole expansions of potential field due to particles in each box
   -- about the box center at the finest mesh level
   var lvl : uint64 = num_lvl
-  var box_per_dim_lvl : uint64 = cmath.pow(2,lvl)
   for particle in r_particles do
-    P2M(r_particles, r_boxes, particle, lvl, box_per_dim_lvl, p)
-    --r_boxes[particle.boxes[lvl]].phi = r_boxes[particle.boxes[lvl]].phi + phi
+    P2M(r_particles, r_boxes, particle, lvl, p)
   end
 
   -- Form multipole expansions about centers of all boxes at coarser mesh
   -- levels
   var box_min : uint64 = box_per_dim - cmath.pow(2,lvl)
   var box_max : uint64 = box_per_dim
-  for lvl = num_lvl-1, -1, 0 do
+  for lvl = num_lvl-1, -1, -1 do
     box_min = box_min - cmath.pow(2,lvl)
     box_max = box_max - cmath.pow(2,lvl+1)
     for ibox = box_min, box_max do
@@ -412,7 +476,38 @@ do
       end
     end
   end
+end
 
+task M2L(r_particles : region(Particle),
+         r_boxes     : region(ispace(int2d, box_per_dim_i2d), Box),
+         num_lvl     : uint64,
+         box_per_dim : uint64,
+         p           : uint64)
+where
+  reads writes(r_particles, r_boxes)
+do
+  var box_min : uint64 = 0
+  var box_max : uint64 = 0
+  for lvl = 1, num_lvl do
+    box_min = box_min + cmath.pow(2,lvl-1)
+    box_max = box_max + cmath.pow(2,lvl)
+    -- First inner loop converts multipole expansion of each box in interaction
+    -- list to local expansion
+    for ibox = box_min, box_max do
+      for jbox = box_min, box_max do
+        incoming_translation(r_boxes, {ibox, jbox}, p)
+      end
+    end
+
+    -- Second inner loop forms local expansion by expanding from box about
+    -- children box centers
+    for ibox = box_min, box_max do
+      for jbox = box_min, box_max do
+        child_translation(r_boxes, {ibox, jbox}, p)
+      end
+    end
+  end
+  return 1
 end
 
 task dump_forces(r_particles : region(Particle),
@@ -422,8 +517,9 @@ where
 do
   var f = c.fopen(filename,"w")
   for particle in r_particles do
-    c.fprintf(f, "%f %f %f\n",
-          particle.field, particle.force._1, particle.force._2)
+    c.fprintf(f, "%f %f %f %f\n",
+          particle.field._1, particle.field._2,
+          particle.force._1, particle.force._2)
   end
   c.fclose(f)
 end
@@ -496,12 +592,19 @@ task toplevel()
 
   -- Upward pass
   var ts_start_up = c.legion_get_current_time_in_micros()
+
   M2M(r_particles, r_boxes, num_lvl, box_per_dim, p)
+
   var ts_stop_up = c.legion_get_current_time_in_micros()
   c.printf("Upward pass took %.4f sec\n", (ts_stop_up - ts_start_up) * 1e-6)
 
-
   -- Downward pass
+  var ts_start_down = c.legion_get_current_time_in_micros()
+
+  M2L(r_particles, r_boxes, num_lvl, box_per_dim, p)
+
+  var ts_stop_down = c.legion_get_current_time_in_micros()
+  c.printf("Downward pass took %.4f sec\n", (ts_stop_down - ts_start_down) * 1e-6)
 
 --  c.printf("Force calculation took %.4f sec\n", (ts_stop_forces - ts_start_forces) * 1e-6)
 
