@@ -28,7 +28,7 @@ fspace Particle {
   pos      : Vector3d; -- Position vector
   vel      : Vector3d; -- Velocity vector
   force    : Vector3d; -- Force vector
-  field    : double;   -- Field strength
+  field    : Vector3d; -- Field strength
   boxes    : int3d[5]; -- Boxes containing particle
   id       : int64;    -- Particle ID
 }
@@ -37,7 +37,7 @@ fspace Particle {
 fspace Box {
   Parent     : int3d;      -- Parent box
   Children   : int3d[8];   -- Children boxes, up to 8 per box in 3d
-  Ilist      : int3d[189]; -- Interaction list, up to 189 (6^3 - 9^3)
+  Ilist      : int3d[189]; -- Interaction list, up to 189 (6^3 - 3^3)
   neighb     : int3d[26];  -- Neighbors
   part       : int64[64];  -- Particles in box
   num_child  : int32;      -- Number of children
@@ -46,9 +46,10 @@ fspace Box {
   num_part   : int32;      -- Number of particles in box
   ctr        : Vector3d;   -- Box center
   S          : double;     -- Box side length
-  phi        : double;     -- p-term multipole expansion due to particles in box
-  psi        : double;     -- p-term multipole expansion due to interaction list
-  psi_tilde  : double;     --
+  phi        : Vector3d;   -- p-term multipole expansion due to particles in box
+  psi        : Vector3d;   -- p-term expansion due to interaction list
+  psi_tilde  : Vector3d;   -- p-term local expansion due to particles in parent's
+                           -- interaction list
 }
 
 terra skip_header(f : &c.FILE)
@@ -112,7 +113,7 @@ do
   var ipart : int64 = 0
   for particle in r_particles do
     particle.force = Vector3d {0.0, 0.0, 0.0}
-    particle.field = 0.0
+    particle.field = Vector3d {0.0, 0.0, 0.0}
     particle.id = ipart
     ipart = ipart + 1
   end
@@ -204,11 +205,10 @@ task create_neighb(r_boxes : region(ispace(int3d, box_per_dim), Box),
 where
   reads writes(r_boxes)
 do
-  var offset : int64 = -1
   for lvl = 1,num_lvl do
   var num_box_lvl : uint64 = cmath.pow(2,lvl)
-  offset = offset + cmath.pow(2,lvl)
-  for i = 0,num_box_lvl do
+  var offset : int64 = -1 + cmath.pow(2,lvl)
+  for i = 0, num_box_lvl do
   for j = 0, num_box_lvl do
   for k = 0, num_box_lvl do
   -- Inner loop to find boxes within domain
@@ -292,7 +292,9 @@ do
   fill(r_boxes.num_child, 0)
   fill(r_boxes.num_neighb, 0)
   fill(r_boxes.Parent, {-1, -1, -1})
-
+  fill(r_boxes.phi, {0.0, 0.0, 0.0})
+  fill(r_boxes.psi, {0.0, 0.0, 0.0})
+  fill(r_boxes.psi_tilde, {0.0, 0.0, 0.0})
   -- Create FMM tree
   for particle in r_particles do
     create_tree(num_lvl, r_particles, r_boxes, particle, ctr, S)
@@ -306,14 +308,27 @@ do
 
 end
 
-task P2M(r_particles : region(Particle)
-         r_boxes     : region(ispace(int3d, box_per_dim), Box),
-         particle    : ptr(Particle,r_particles),
-         lvl         : uint64,
-         p           : uint64)
+task P2M(r_particles   : region(Particle),
+         r_boxes       : region(ispace(int3d, box_per_dim), Box),
+         particle      : ptr(Particle,r_particles),
+         lvl           : uint64,
+         num_boxes_lvl : uint64,
+         p             : uint64)
 where
-
+  reads writes(r_particles, r_boxes)
 do
+  var ds : Vector3d = particle.pos - r_boxes[particle.boxes[lvl]].ctr
+  if ds._1 == 0.0 and ds._2 == 0.0 and ds._3 == 0.0 then
+    return Vector3d {0.0, 0.0, 0.0}
+  else
+    var phi : Vector3d = Vector3d {cmath.log(ds._1), cmath.log(ds._2),
+                         cmath.log(ds._3)}
+    phi = particle.q * phi
+    for k = 0, p do
+      phi._1 = phi._1 - cmath.pow(ds._1,-k) * particle.q * cmath.pow(ds._1,k)
+    end
+    return Vector3d {1.0, 1.0, 1.0}
+  end
 
 end
 
@@ -329,8 +344,8 @@ do
   var lvl : uint64 = num_lvl
   var num_boxes_lvl : uint64 = cmath.pow(2,lvl)
   for particle in r_particles do
-    var phi : double = P2M(r_particles, r_boxes, particle, lvl, num_boxes_lvl, p)
-    r_boxes[particle.box[lvl]].phi = r_boxes[particle.box[lvl]].phi + phi
+    var phi : Vector3d = P2M(r_particles, r_boxes, particle, lvl, num_boxes_lvl, p)
+    r_boxes[particle.boxes[lvl]].phi = r_boxes[particle.boxes[lvl]].phi + phi
   end
 
 end
@@ -389,9 +404,9 @@ task toplevel()
   var ctr : Vector3d = 0.5*(xmin + xmax)
   var S : double = max(max(xmax._1 - xmin._1, xmax._2 - xmin._2), xmax._3 - xmin._3)
 
-  -- Calculate number of levels of refinement n = log_8(num_particles) and
-  -- order p = log_2(epsilon)
-  var num_lvl : uint64 = cmath.ceil(cmath.log(config.num_particles)/cmath.log(8))
+  -- Calculate number of levels of refinement n = log_8(num_particles/3) to have
+  -- ~3 particles per box in 3d, and calculate order p = log_2(epsilon)
+  var num_lvl : uint64 = cmath.ceil(cmath.log(config.num_particles/3)/cmath.log(8))
   var p : uint64 = cmath.ceil(cmath.log(1/config.epsilon)/cmath.log(2))
   if p < 1 then p = 1 end
 
@@ -417,7 +432,11 @@ task toplevel()
   c.printf("Interaction list setup took %.4f sec\n", (ts_stop_ilist - ts_start_ilist) * 1e-6)
 
   -- Upward pass
+  var ts_start_up = c.legion_get_current_time_in_micros()
   M2M(r_particles, r_boxes, num_lvl, p)
+  var ts_stop_up = c.legion_get_current_time_in_micros()
+  c.printf("Upward pass took %.4f sec\n", (ts_stop_up - ts_start_up) * 1e-6)
+
 
   -- Downward pass
 
