@@ -49,6 +49,8 @@ fspace Box {
   psi        : Vector2d;   -- p-term expansion due to interaction list
   psi_tilde  : Vector2d;   -- p-term local expansion due to particles in parent's
                            -- interaction list
+  a_0        : double;     -- Coefficient in multipole expansion
+  a_k        : Vector2d[4]; -- Coefficient in multipole expansion
 }
 
 terra skip_header(f : &c.FILE)
@@ -99,6 +101,17 @@ terra well_separated(S : double, r : Vector2d)
   else
     return false
   end
+end
+
+terra vec_pow(vec : Vector2d, k : uint64)
+  var tmp1 : Vector2d = vec
+  var tmp2 : Vector2d
+  for i = 0, k do
+    tmp2 = Vector2d {vec._1 * tmp1._1 - vec._2 * tmp1._2,
+                     vec._1 * tmp1._2 + vec._2 * tmp1._1}
+    tmp1 = tmp2
+  end
+  return tmp2
 end
 
 task initialize_particles(r_particles   : region(Particle),
@@ -271,8 +284,10 @@ do
   r_boxes[{0,0}].ctr = ctr
   r_boxes[{0,0}].S = S
   var child_init : int2d[4]
+  var a_k_init : Vector2d[4]
   for i = 0, 4 do
     child_init[i] = {-1, -1}
+    a_k_init[i] = {0.0, 0.0}
   end
   fill(r_boxes.Children, child_init)
   fill(r_boxes.num_part, 0)
@@ -282,6 +297,7 @@ do
   fill(r_boxes.phi, {0.0, 0.0})
   fill(r_boxes.psi, {0.0, 0.0})
   fill(r_boxes.psi_tilde, {0.0, 0.0})
+  fill(r_boxes.a_k, a_k_init)
   -- Create FMM tree
   for particle in r_particles do
     create_tree(num_lvl, r_particles, r_boxes, particle, ctr, S)
@@ -305,15 +321,17 @@ where
   reads writes(r_particles, r_boxes)
 do
   var ds : Vector2d = particle.pos - r_boxes[particle.boxes[lvl]].ctr
-  if ds._1 == 0.0 and ds._2 == 0.0 then
-    return Vector2d {0.0, 0.0}
-  else
-    var phi : Vector2d = Vector2d {cmath.log(ds._1), cmath.log(ds._2)}
-    phi = particle.q * phi
+
+  if ds._1 ~= 0.0 or ds._2 ~= 0.0 then
+    var a_k : Vector2d
+    --phi = particle.q * phi
     for k = 0, p do
-      phi._1 = phi._1 - cmath.pow(ds._1,-k) * particle.q * cmath.pow(ds._1,k)
+      a_k = -1/k * particle.q * vec_pow(ds,k)
+      r_boxes[particle.boxes[lvl]].a_k[k] = r_boxes[particle.boxes[lvl]].a_k[k] + a_k
     end
-    return Vector2d {1.0, 1.0}
+    r_boxes[particle.boxes[lvl]].a_0 = r_boxes[particle.boxes[lvl]].a_0
+                                       + particle.q
+    return
   end
 
 end
@@ -330,8 +348,16 @@ do
   var lvl : uint64 = num_lvl
   var box_per_dim_lvl : uint64 = cmath.pow(2,lvl)
   for particle in r_particles do
-    var phi : Vector2d = P2M(r_particles, r_boxes, particle, lvl, box_per_dim_lvl, p)
-    r_boxes[particle.boxes[lvl]].phi = r_boxes[particle.boxes[lvl]].phi + phi
+    P2M(r_particles, r_boxes, particle, lvl, box_per_dim_lvl, p)
+    --r_boxes[particle.boxes[lvl]].phi = r_boxes[particle.boxes[lvl]].phi + phi
+  end
+
+  -- Form multipole expansions about centers of all boxes at coarser mesh
+  -- levels
+  for lvl = num_lvl-1, -1, 0 do
+    for box in r_boxes[particle.boxes[lvl]] do
+
+    end
   end
 
 end
@@ -390,7 +416,7 @@ task toplevel()
 
   -- Calculate number of levels of refinement n = log_4(num_particles/3) to have
   -- ~3 particles per box in 2d, and calculate order p = log_2(epsilon)
-  var num_lvl : uint64 = cmath.ceil(cmath.log(config.num_particles/3)/cmath.log(4))
+  var num_lvl : uint64 = cmath.floor(cmath.log(config.num_particles/3)/cmath.log(4))
   var p : uint64 = cmath.ceil(cmath.log(1/config.epsilon)/cmath.log(2))
   if p < 1 then p = 1 end
 
