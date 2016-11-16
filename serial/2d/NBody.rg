@@ -137,7 +137,6 @@ task toplevel()
   var ts_start_forces = c.legion_get_current_time_in_micros()
   var i : uint8 = 0
   for particle1 in r_particles do
-    --particle1.field = 0.0
     for particle2 in r_particles do
       if particle1 ~= particle2 then
         var r : Vector2d = particle2.pos - particle1.pos
