@@ -103,7 +103,7 @@ where
 do
   var f = c.fopen(filename,"w")
   for particle in r_particles do
-    c.fprintf(f, "%f %f %f %f\n",
+    c.fprintf(f, "%18.16f %18.16f %18.16f %18.16f\n",
           particle.field._1, particle.field._2,
           particle.force._1, particle.force._2)
   end
@@ -141,7 +141,7 @@ task toplevel()
       if particle1 ~= particle2 then
         var r : Vector2d = particle2.pos - particle1.pos
         var kern : double = r:kfun()
-        var field_new : Vector2d = r * particle2.q * cmath.pow(kern,3)
+        var field_new : Vector2d = r * particle2.q * cmath.pow(kern,2)
         particle1.field = particle1.field + field_new
         particle1.force = particle1.force + field_new * particle1.q
       end
