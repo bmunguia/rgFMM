@@ -26,6 +26,7 @@ fspace Particle {
   vel      : Vector2d; -- Velocity vector
   force    : Vector2d; -- Force vector
   field    : Vector2d; -- Field vector
+  phi      : double;   -- Potential
 }
 
 terra skip_header(f : &c.FILE)
@@ -68,6 +69,11 @@ terra Vector2d.metamethods.__mul(v : Vector2d, c : double)
   return Vector2d { v._1 * c, v._2 * c }
 end
 
+terra comp_log(vec : Vector2d)
+  return Vector2d {cmath.log(sqrt(cmath.pow(vec._1,2) + cmath.pow(vec._2,2))),
+                   cmath.atan2(vec._2,vec._1)}
+end
+
 task initialize_particles(r_particles   : region(Particle),
                           filename      : int8[512])
 where
@@ -103,7 +109,8 @@ where
 do
   var f = c.fopen(filename,"w")
   for particle in r_particles do
-    c.fprintf(f, "%18.16f %18.16f %18.16f %18.16f\n",
+    c.fprintf(f, "%18.16f %18.16f %18.16f %18.16f %18.16f\n",
+          particle.phi,
           particle.field._1, particle.field._2,
           particle.force._1, particle.force._2)
   end
@@ -144,6 +151,8 @@ task toplevel()
         var field_new : Vector2d = r * particle2.q * cmath.pow(kern,2)
         particle1.field = particle1.field + field_new
         particle1.force = particle1.force + field_new * particle1.q
+	var phi_vec = comp_log(r) * particle2.q
+	particle1.phi = particle1.phi + phi_vec._1
       end
     end
   end
