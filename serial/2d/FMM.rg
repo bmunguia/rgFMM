@@ -132,9 +132,9 @@ terra comp_log(vec : Vector2d)
 end
 
 terra factorial(n : int32)
-  var fact : int32 = n
   if n == 0 then return 1
-    else
+  else
+    var fact : int32 = 1
     for k = 1, n+1 do
       fact = fact * k
     end
@@ -143,7 +143,18 @@ terra factorial(n : int32)
 end
 
 terra choose(n : int32, k : int32)
-  return factorial(n)/(factorial(k) * factorial(n - k))
+  if k == 0 then return 1
+  else
+    var kf : int64 = 1
+    var nf : int64 = 1
+    for i = 2, k+1 do
+      kf = kf * i
+    end
+    for i = n-k+1, n+1 do
+      nf = nf * i
+    end
+    return nf/kf
+  end
 end
 
 task initialize_particles(r_particles   : region(Particle),
@@ -238,7 +249,7 @@ do
     r_boxes[{ibox,jbox}].num_part = r_boxes[{ibox,jbox}].num_part + 1
     particle.boxes[lvl+1] = {ibox,jbox}
     r_boxes[{ibox,jbox}].part[r_boxes[{ibox,jbox}].num_part-1] =
-      unsafe_cast(ptr(Particle,r_particles),particle.id)
+           unsafe_cast(ptr(Particle,r_particles),particle.id)
 
     -- Update current box
     icurr = {ibox,jbox}
@@ -281,8 +292,8 @@ do
 
 end
 
-task create_Ilist(r_boxes : region(ispace(int2d, box_per_dim_i2d), Box),
-                  node_ind    : int2d)
+task create_Ilist(r_boxes  : region(ispace(int2d, box_per_dim_i2d), Box),
+                  node_ind : int2d)
 where
   reads(r_boxes.num_neighb, r_boxes.neighb, r_boxes.num_ilist, r_boxes.Children,
         r_boxes.num_child, r_boxes.ctr, r_boxes.S, r_boxes.Parent, r_boxes.Ilist),
@@ -368,8 +379,10 @@ where
   reads(r_particles.q, r_particles.pos, r_particles.boxes, r_boxes.ctr, r_boxes.a_k),
   writes(r_boxes.a_k)
 do
-  var ds : Vector2d = particle.pos - r_boxes[particle.boxes[lvl]].ctr
+  r_boxes[particle.boxes[lvl]].a_k[0] = r_boxes[particle.boxes[lvl]].a_k[0]
+                                       + Vector2d {particle.q, 0.0}
 
+  var ds : Vector2d = particle.pos - r_boxes[particle.boxes[lvl]].ctr
   if ds._1 ~= 0.0 or ds._2 ~= 0.0 then
     var a_k : Vector2d = particle.q * Vector2d {1.0, 0.0}
     for k = 1, p do
@@ -377,8 +390,6 @@ do
       r_boxes[particle.boxes[lvl]].a_k[k] = r_boxes[particle.boxes[lvl]].a_k[k]
                                             - (1/k) * a_k
     end
-    r_boxes[particle.boxes[lvl]].a_k[0] = r_boxes[particle.boxes[lvl]].a_k[0]
-                                       + Vector2d {particle.q, 0.0}
   end
 
 end
@@ -400,17 +411,13 @@ do
         var d : Vector2d = r_boxes[box_id].ctr
                            - r_boxes[r_boxes[box_id].Children[j]].ctr
         var a_sig : Vector2d = r_boxes[r_boxes[box_id].Children[j]].a_k[0]
-        for ii = 1, k+1 do
-          a_sig = comp_mul(d,a_sig)
-        end
+	a_sig = comp_mul(comp_pow(d,k),a_sig)
         r_boxes[box_id].a_k[k] = r_boxes[box_id].a_k[k]
                                  - 1/k * a_sig
         for i = 1, k do
           var ch_pq : int32 = choose(k-1,i-1)
           a_sig = r_boxes[r_boxes[box_id].Children[j]].a_k[i]
-          for ii = 1, k-i+1 do
-            a_sig = comp_mul(d,a_sig)
-          end
+	  a_sig = comp_mul(comp_pow(d,k-i),a_sig)
           r_boxes[box_id].a_k[k] = r_boxes[box_id].a_k[k]
                                    + ch_pq * a_sig
         end
@@ -444,9 +451,9 @@ do
                                    + cmath.pow(-1.0,k) * b_mul
         end
       end
-      
+
     else
-    
+
       for j = 0, r_boxes[box_id].num_ilist do
         var d : Vector2d =  r_boxes[r_boxes[box_id].Ilist[j]].ctr
                             - r_boxes[box_id].ctr
@@ -463,6 +470,7 @@ do
 
       end
     end
+--    c.printf("b_l = %e, %e\n", r_boxes[box_id].b_l[l]._1, r_boxes[box_id].b_l[l]._2)
   end
 
   end
@@ -477,17 +485,16 @@ where
 do
 
   for j = 0, r_boxes[box_id].num_child do
-    var box_child = r_boxes[r_boxes[box_id].Children[j]]
-    var d : Vector2d =  r_boxes[box_id].ctr - box_child.ctr
-    box_child.b_l = r_boxes[box_id].b_l
+    var box_child = r_boxes[box_id].Children[j]
+    var d : Vector2d =  r_boxes[box_id].ctr - r_boxes[box_child].ctr
     for l = 0, p do
-      for k = p-j-1, p do
-        -- Horner scheme
-        box_child.b_l[k] = box_child.b_l[k]
-                           - comp_mul(d,r_boxes[box_id].b_l[k+1])
+      for k = l, p do
+        var ch_pq : int32 = choose(k,l)
+        r_boxes[box_child].b_l[l] = r_boxes[box_child].b_l[l]
+	                            + ch_pq * comp_mul(r_boxes[box_id].b_l[k],
+				    comp_pow(Vector2d { -d._1,  -d._2}, k-l))
       end
     end
-    r_boxes[r_boxes[box_id].Children[j]].b_l = box_child.b_l
   end
 
 end
@@ -591,7 +598,7 @@ do
     for k = 1, p do
       particle.field = particle.field + comp_mul(comp_pow(y-ctr,k),box.b_l[k])
       phi_vec = phi_vec + comp_mul(comp_pow(y-ctr,k),box.b_l[k])
-    end 
+    end
 
     -- Direct computation of influence from current box particles
     var num_near = box.num_part

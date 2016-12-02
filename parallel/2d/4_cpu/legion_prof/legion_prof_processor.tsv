@@ -1,0 +1,8 @@
+level	processor
+21	CPU Processor 0x1d00000000000003
+8	CPU Processor 0x1d00000000000001
+26	CPU Processor 0x1d00000000000004
+5	Utility Processor 0x1d00000000000000
+14	CPU Processor 0x1d00000000000002
+30	Fill System Memory 0x1e00000000000000 Channel
+34	System Memory 0x1e00000000000000

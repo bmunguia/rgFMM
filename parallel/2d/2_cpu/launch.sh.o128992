@@ -1,0 +1,19 @@
+Force coefficient = 6.674083e-11
+Particle initialization took 0.0025 sec
+Number of mesh levels : 5
+Order p of multipole expansion : 16
+Num_boxes = 1365
+Interaction list setup took 0.0092 sec
+Upward pass took 0.0003 sec
+Evaluating forces
+Downward pass took 0.0002 sec
+M2L : First inner loop
+M2L : Second inner loop
+M2L : First inner loop
+M2L : Second inner loop
+M2L : First inner loop
+M2L : Second inner loop
+M2L : First inner loop
+M2L : Second inner loop
+M2L : Finest mesh level
+M2L : complete
