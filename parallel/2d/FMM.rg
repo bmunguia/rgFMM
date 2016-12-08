@@ -21,18 +21,6 @@ struct Vector2d {
   _2 : double;
 }
 
--- Fieldspace 'Particle'
-fspace Particle {
-  q        : double;   -- Particle source strength
-  pos      : Vector2d; -- Position vector
-  vel      : Vector2d; -- Velocity vector
-  force    : Vector2d; -- Force vector
-  field    : Vector2d; -- Field strength
-  phi      : double;   -- Potential
-  boxes    : int2d[12]; -- Boxes containing particle
-  id       : ptr;    -- Particle ID
-}
-
 -- Fieldspace 'Box'
 fspace Box {
   Parent     : int2d;      -- Parent box
@@ -57,6 +45,18 @@ fspace Box {
   a_0        : double;     -- Coefficient in multipole expansion
   a_k        : Vector2d[16]; -- Coefficient in multipole expansion
   b_l        : Vector2d[16]; -- Coefficient in local expansion
+}
+
+-- Fieldspace 'Particle'
+fspace Particle(r: region(ispace(int2d), Box)) {
+  q        : double;   -- Particle source strength
+  pos      : Vector2d; -- Position vector
+  vel      : Vector2d; -- Velocity vector
+  force    : Vector2d; -- Force vector
+  field    : Vector2d; -- Field strength
+  phi      : double;   -- Potential
+  boxes    : int2d(Box,r); -- Leaf box containing particle
+  id       : ptr;    -- Particle ID
 }
 
 terra wait_for(x : int) return 1 end
@@ -163,8 +163,9 @@ terra choose(n : int64, k : int64)
   end
 end
 
-task initialize_particles(r_particles   : region(Particle),
-                          filename      : int8[512])
+task initialize_particles(r_boxes     : region(ispace(int2d), Box),
+                          r_particles : region(Particle(r_boxes)),
+                          filename    : int8[512])
 where
   reads writes(r_particles)
 do
@@ -195,8 +196,8 @@ do
 end
 
 task create_tree(num_lvl     : int64,
-                 r_particles : region(Particle),
-                 r_boxes     : region(ispace(int2d, box_per_dim_i2d), Box),
+                 r_boxes     : region(ispace(int2d), Box),
+		 r_particles : region(Particle(r_boxes)),
                  ctr_0       : Vector2d,
                  S_0         : double)
 where
@@ -209,7 +210,7 @@ do
   var x : double = particle.pos._1
   var y : double = particle.pos._2
 
-  particle.boxes[0] = {0,0}
+--  particle.boxes[0] = {0,0}
 
   var icurr : int2d = {0, 0}
   var ibox : int64 = 0
@@ -267,11 +268,12 @@ do
       end
     end
 
-    particle.boxes[lvl+1] = {ibox,jbox}
+--    particle.boxes[lvl+1] = {ibox,jbox}
     if lvl == num_lvl-1 then
     r_boxes[{ibox,jbox}].num_part = r_boxes[{ibox,jbox}].num_part + 1
     r_boxes[{ibox,jbox}].part[r_boxes[{ibox,jbox}].num_part-1] =
-           unsafe_cast(ptr(Particle,r_particles),particle.id)
+                         unsafe_cast(ptr(Particle(r_boxes),r_particles),particle.id)
+    particle.boxes = unsafe_cast(int2d(Box,r_boxes), {ibox,jbox})
     end
 
     -- Update current box
@@ -368,6 +370,53 @@ do
 
 end
 
+task create_Ilist_new(r_boxes     : region(ispace(int2d), Box),
+                      r_boxes_par : region(ispace(int2d),Box))
+where
+  reads(r_boxes, r_boxes_par),
+  writes(r_boxes.num_ilist, r_boxes.Ilist, r_boxes.ilist_imin,
+         r_boxes.ilist_imax, r_boxes.ilist_jmin, r_boxes.ilist_jmax)
+do
+  for box in r_boxes do
+  
+  var S : double = box.S
+  var ctr : Vector2d = box.ctr
+
+  if box.Parent ~= [int2d]{-1,-1} then
+    var num_pn : int64 = r_boxes_par[box.Parent].num_neighb
+    var pn : int2d[8] = r_boxes_par[box.Parent].neighb
+    -- Loop over parent's neighbors
+    for j = 0, num_pn do
+      -- Loop over children
+      for i = 0, r_boxes_par[pn[j]].num_child do
+        var child : int2d = r_boxes_par[pn[j]].Children[i]
+        var r : Vector2d = r_boxes[child].ctr - ctr
+        if well_separated(S,r) then
+          box.num_ilist = box.num_ilist + 1
+          box.Ilist[box.num_ilist-1] = child
+        end
+      end
+      -- Get min and max indices for interaction list partitioning
+      if r_boxes_par[pn[j]].child_imin < box.ilist_imin then
+	box.ilist_imin = r_boxes[pn[j]].child_imin
+      end
+      if r_boxes_par[pn[j]].child_imax > box.ilist_imax then
+	box.ilist_imax = r_boxes[pn[j]].child_imax
+      end
+      if r_boxes_par[pn[j]].child_jmin < box.ilist_jmin then
+	box.ilist_jmin = r_boxes_par[pn[j]].child_jmin
+      end
+      if r_boxes_par[pn[j]].child_jmax > box.ilist_jmax then
+	box.ilist_jmax = r_boxes_par[pn[j]].child_jmax
+      end
+
+    end
+
+  end
+  
+  end
+end
+
 task init_boxes(r_boxes : region(ispace(int2d, box_per_dim_i2d), Box),
                 ctr     : Vector2d,
                 S       : double,
@@ -407,25 +456,25 @@ do
 
 end
 
-task P2M(r_particles : region(Particle),
-         r_boxes     : region(ispace(int2d, box_per_dim_i2d), Box),
+task P2M(r_boxes     : region(ispace(int2d), Box),
+	 r_particles : region(Particle(r_boxes)),
          lvl         : int64,
          p           : int64)
 where
   reads(r_particles.q, r_particles.pos, r_particles.boxes, r_boxes.ctr, r_boxes.a_k),
-  reduces+(r_boxes.a_k)
+  writes(r_boxes.a_k)
 do
   for particle in r_particles do
 
-  r_boxes[particle.boxes[lvl]].a_k[0] = r_boxes[particle.boxes[lvl]].a_k[0]
+  r_boxes[particle.boxes].a_k[0] = r_boxes[particle.boxes].a_k[0]
                                        + Vector2d {particle.q, 0.0}
 
-  var ds : Vector2d = particle.pos - r_boxes[particle.boxes[lvl]].ctr
+  var ds : Vector2d = particle.pos - r_boxes[particle.boxes].ctr
   if ds._1 ~= 0.0 or ds._2 ~= 0.0 then
     var a_k : Vector2d = particle.q * Vector2d {1.0, 0.0}
     for k = 1, p do
       a_k = comp_mul(a_k,ds)
-      r_boxes[particle.boxes[lvl]].a_k[k] += - (1/k) * a_k
+      r_boxes[particle.boxes].a_k[k] += - (1/k) * a_k
     end
   end
 
@@ -478,7 +527,6 @@ do
 
       end
     end
---    c.printf("b_l = %e, %e\n", r_boxes[box_id].b_l[l]._1, r_boxes[box_id].b_l[l]._2)
   end
 
   end
@@ -560,7 +608,7 @@ task M2M(r_boxes       : region(ispace(int2d), Box),
          r_boxes_child : region(ispace(int2d), Box),
          p             : int64)
 where
-  reads(r_boxes, r_boxes_child.ctr, r_boxes_child.a_k), reduces+(r_boxes.a_k)
+  reads(r_boxes, r_boxes_child.ctr, r_boxes_child.a_k), writes(r_boxes.a_k)
 do
   
   for box in r_boxes do
@@ -594,8 +642,8 @@ do
 
 end
 
-task eval_forces(r_particles : region(Particle),
-                 r_boxes     : region(ispace(int2d, box_per_dim_i2d), Box),
+task eval_forces(r_boxes     : region(ispace(int2d), Box),
+		 r_particles : region(Particle(r_boxes)),
                  num_lvl     : int64,
                  box_per_dim : int64,
                  p           : int64)
@@ -605,7 +653,7 @@ where
 do
 
   for particle in r_particles do
-    var box = r_boxes[particle.boxes[num_lvl]]
+    var box = r_boxes[particle.boxes]
     var y = particle.pos
     var ctr = box.ctr
     var phi_vec = box.b_l[0]
@@ -649,7 +697,8 @@ do
 
 end
 
-task dump_forces(r_particles : region(Particle),
+task dump_forces(r_boxes     : region(ispace(int2d), Box),
+                 r_particles : region(Particle(r_boxes)),
                  filename : int8[512],
                  token : int64)
 where
@@ -696,14 +745,31 @@ task toplevel()
   var force_const : double = get_force_const(config.model_type)
   c.printf("Force coefficient = %e\n", force_const)
 
-  -- Create a region of particles
-  var r_particles = region(ispace(ptr, config.num_particles), Particle)
+  -- Calculate number of levels of refinement n = log_4(num_particles/3) to have
+  -- ~3 particles per box in 2d
+  var num_lvl : int64 = cmath.floor(cmath.log(config.num_particles/3)/cmath.log(4)) 
+
+  c.printf("Number of mesh levels : %i\n", num_lvl)
+
+  -- Create a region of boxes and particles
+  var num_boxes : int64 = 0
+  var box_per_dim : int64 = 0
+  var box_per_dim_i2d : int2d = {0,0}
+  for ilvl = 0, num_lvl+1 do
+    num_boxes = num_boxes + cmath.pow(4,ilvl)
+    box_per_dim = box_per_dim + cmath.pow(2,ilvl)
+  end
+  box_per_dim_i2d = {box_per_dim,box_per_dim}
+  c.printf("Num_boxes = %i\n", num_boxes)
+
+  var r_boxes = region(ispace(int2d, box_per_dim_i2d), Box)
+  var r_particles = region(ispace(ptr, config.num_particles), Particle(r_boxes))
 
   -- Allocate all the particles
-  new(ptr(Particle, r_particles), config.num_particles)
+  new(ptr(Particle(r_boxes), r_particles), config.num_particles)
 
   -- Initialize the particles from an input file
-  initialize_particles(r_particles, config.input)
+  initialize_particles(r_boxes, r_particles, config.input)
 
   var ts_stop_init = c.legion_get_current_time_in_micros()
   c.printf("Particle initialization took %.4f sec\n", (ts_stop_init - ts_start_init) * 1e-6)
@@ -727,36 +793,17 @@ task toplevel()
   var ctr : Vector2d = 0.5*(xmin + xmax)
   var S : double = max(xmax._1 - xmin._1, xmax._2 - xmin._2)
 
-  -- Calculate number of levels of refinement n = log_4(num_particles/3) to have
-  -- ~3 particles per box in 2d, and calculate order p = log_2.12(epsilon)
-  var num_lvl : int64 = cmath.floor(cmath.log(config.num_particles/3)/cmath.log(4))
+  -- Calculate order p = log_2.12(epsilon)
   var p : int64 = cmath.ceil(cmath.log(config.epsilon/qmax)/cmath.log(2.12))
-
   p = sqrt(p*p)
   if p < 4 then p = 4
   elseif p > 16 then p = 16
   end
-  --num_lvl = 3
-
-  c.printf("Number of mesh levels : %i\n", num_lvl)
   c.printf("Order p of multipole expansion : %i\n", p)
-
-  -- Create a region of boxes
-  var num_boxes : int64 = 0
-  var box_per_dim : int64 = 0
-  var box_per_dim_i2d : int2d = {0,0}
-  for ilvl = 0, num_lvl+1 do
-    num_boxes = num_boxes + cmath.pow(4,ilvl)
-    box_per_dim = box_per_dim + cmath.pow(2,ilvl)
-  end
-  box_per_dim_i2d = {box_per_dim,box_per_dim}
-  c.printf("Num_boxes = %i\n", num_boxes)
-  var r_boxes = region(ispace(int2d, box_per_dim_i2d), Box)
 
   -- Create partitions
   var p_colors = ispace(int1d, config.parallelism)
   var p_particles = partition(equal, r_particles, p_colors)
-  --var p_boxes = partition(equal, r_boxes, p_colors)
 
   -- Partition boxes based on levels
   var coloring = c.legion_domain_point_coloring_create()
@@ -783,21 +830,18 @@ task toplevel()
 
   -- Create FMM tree
   for color in p_colors do
-    create_tree(num_lvl, p_particles[color], r_boxes, ctr, S)
+    create_tree(num_lvl, r_boxes, p_particles[color], ctr, S)
   end
 
   -- Create neighbors list
   for lvl = 1, num_lvl+1 do
-    --var box_per_dim_lvl : int64 = cmath.pow(2,lvl)
-    --for i = 0, box_per_dim_lvl do
-    --for j = 0, box_per_dim_lvl do
       create_neighb(p_boxes_lvl[lvl], lvl)
-    --end
-    --end
   end
 
   -- Create interactions list
-  create_Ilist(r_boxes, int2d {0,0})
+  for lvl = 2, num_lvl do
+    create_Ilist_new(p_boxes_lvl[lvl], p_boxes_lvl[lvl-1])
+  end
 
   var ts_stop_ilist = c.legion_get_current_time_in_micros()
   c.printf("Interaction list setup took %.4f sec\n", (ts_stop_ilist - ts_start_ilist) * 1e-6)
@@ -812,16 +856,6 @@ task toplevel()
     i_min = box_min[ilvl]
     i_max = box_max[ilvl]
     for ibox = i_min, i_max+1 do
-      --for jbox = i_min, i_max+1 do
-      --var box = r_boxes[{ibox,jbox}]
-      --c.legion_domain_point_coloring_color_domain(c_self, [int1d](icolor),
-      --                     rect2d{{ibox,jbox},{ibox,jbox}})
-      --c.legion_domain_point_coloring_color_domain(c_child, [int1d](icolor),
-      --                     rect2d{{box.child_imin,box.child_jmin},{box.child_imax,box.child_jmax}})
-      --c.legion_domain_point_coloring_color_domain(c_ilist, [int1d](icolor),
-      --                     rect2d{{box.ilist_imin,box.ilist_jmin},{box.ilist_imax,box.ilist_jmax}})
-      --icolor +=1
-      --end
       if ilvl < 5 then
         var box_min = r_boxes[{ibox,i_min}]
         var box_max = r_boxes[{ibox,i_max}]
@@ -861,14 +895,6 @@ task toplevel()
               rect2d{{child_imin,child_jmin},{child_imax,child_jmax}})
           c.legion_domain_point_coloring_color_domain(c_ilist, [int1d](icolor),
               rect2d{{ilist_imin,ilist_jmin},{ilist_imax,ilist_jmax}})
---	  var box_min = r_boxes[{ibox,j_min}]
---          var box_max = r_boxes[{ibox,j_max}]
---          c.legion_domain_point_coloring_color_domain(c_self, [int1d](icolor),
---              rect2d{{ibox,j_min},{ibox,j_max}})
---          c.legion_domain_point_coloring_color_domain(c_child, [int1d](icolor),
---              rect2d{{box_min.child_imin,box_min.child_jmin},{box_max.child_imax,box_max.child_jmax}})
---          c.legion_domain_point_coloring_color_domain(c_ilist, [int1d](icolor),
---              rect2d{{box_min.ilist_imin,box_min.ilist_jmin},{box_max.ilist_imax,box_max.ilist_jmax}})
           icolor += 1
 	end
       end
@@ -889,31 +915,18 @@ task toplevel()
   -- Particle to multipole
   var token : int32 = 0
   for color in p_colors do
-    P2M(p_particles[color], p_boxes_lvl[num_lvl], num_lvl, p)
+    P2M(r_boxes, p_particles[color], num_lvl, p)
   end
 
   --Multipole to multipole
---  var box_min_lvl : int64 = box_per_dim - cmath.pow(2,num_lvl)
---  var box_max_lvl : int64 = box_per_dim - 1
---  for lvl = num_lvl-1, -1, -1 do
---    box_min_lvl = box_min_lvl - cmath.pow(2,lvl)
---    box_max_lvl = box_max_lvl - cmath.pow(2,lvl+1)
---    M2M(r_boxes, box_min_lvl, box_max_lvl, p)
---  end
-
---  for lvl = num_lvl-1, -1, -1 do
---    for ibox = box_min[lvl], box_max[lvl]+1 do
---    for jbox = box_min[lvl], box_max[lvl]+1 do
---    M2M(p_boxes_self[{ibox,jbox}], p_boxes_child[{ibox,jbox}], p)
---    end
---    end
---  end
-  --for i = (icolor-box_max[num_lvl]+box_min[num_lvl]), -1, -1 do
---  for i = icolor-(i_max-i_min)*(i_max-i_min), -1, -1 do
-  var i_init : int64 = [int64](icolor-(i_max-i_min))
-  for i = i_init+1, -1, -1 do
-    var ccolor = [int1d](i)
-    M2M(p_boxes_self[ccolor], p_boxes_child[ccolor], p)
+  for lvl = num_lvl-1, -1, -1 do
+    var r_l = p_boxes_lvl[lvl]
+    var r_c = p_boxes_lvl[lvl+1]
+    var p_l = partition(equal,r_l,ispace(int2d,{8,8}))
+    var p_c = partition(equal,r_c,ispace(int2d,{8,8}))
+    for color in p_l.colors do
+      M2M(p_l[color], p_c[color], p)
+    end
   end
 
   var ts_stop_up = c.legion_get_current_time_in_micros()
@@ -925,62 +938,37 @@ task toplevel()
   var ts_start_down = c.legion_get_current_time_in_micros()
 
   -- Multipole to local
---  for lvl = 1, num_lvl+1 do
---    -- First inner loop converts multipole expansion of each box in interaction
---    -- list to local expansion
---    for ibox = box_min[lvl], box_max[lvl]+1 do
---      for jbox = box_min[lvl], box_max[lvl]+1 do
---        M2L(p_boxes_self[{ibox,jbox}], p_boxes_ilist[{ibox,jbox}], p)
---      end
---    end
---  end
-  --__demand(__parallel)
   for ccolor in p_boxes_self.colors do
---  for i = 3, icolor-2000 do
---    var ccolor = [int1d](icolor)
     token += M2L(p_boxes_self[ccolor], p_boxes_ilist[ccolor], p)
   end
   wait_for(token)
 
---  for lvl = 1, num_lvl do
---    -- Second inner loop forms local expansion by expanding from box about
---    -- children box centers
---    for ibox = box_min[lvl], box_max[lvl]+1 do
---      for jbox = box_min[lvl], box_max[lvl]+1 do
---        L2L(p_boxes_self[{ibox,jbox}], p_boxes_child[{ibox,jbox}], p)
---      end
---    end
---  end
-
-  for ccolor in p_boxes_self.colors do
---  for i = 3, icolor-10 do
---    var ccolor = [int1d](icolor)
-    L2L(p_boxes_self[ccolor], p_boxes_child[ccolor], p)
+  -- Local to local
+  for lvl = 2, num_lvl do
+    var r_l = p_boxes_lvl[lvl]
+    var r_c = p_boxes_lvl[lvl+1]
+    var p_l = partition(equal,r_l,ispace(int2d,{8,8}))
+    var p_c = partition(equal,r_c,ispace(int2d,{8,8}))
+    for color in p_l.colors do
+      L2L(p_l[color], p_c[color], p)
+    end
   end
-
---  -- Compute interactions at finest mesh level
---  for ibox = box_min[num_lvl], box_max[num_lvl]+1 do
---    for jbox = box_min[num_lvl], box_max[num_lvl]+1 do
---      M2L(p_boxes_self[{ibox,jbox}], p_boxes_ilist[{ibox,jbox}], p)
---    end
---  end
 
   -- Force evaluation
   c.printf("Evaluating forces\n")
---  eval_forces(r_particles, r_boxes, num_lvl, box_per_dim, p)
-  __demand(__parallel)
-  for color in p_colors do
-    eval_forces(p_particles[color], p_boxes_lvl[num_lvl], num_lvl, box_per_dim, p)
-  end
+  eval_forces(r_boxes, r_particles, num_lvl, box_per_dim, p)
+--  __demand(__parallel)
+--  for color in p_colors do
+--    eval_forces(p_boxes_lvl[num_lvl], p_particles[color], num_lvl, box_per_dim, p)
+--  end
 
   var ts_stop_down = c.legion_get_current_time_in_micros()
   c.printf("Downward pass took %.4f sec\n", (ts_stop_down - ts_start_down) * 1e-6)
 
   -- Dump output
   for color in p_colors do
-    token = dump_forces(p_particles[color], config.output, token)
+    token = dump_forces(r_boxes, p_particles[color], config.output, token)
   end
---  token = dump_coeffs(r_boxes, config.output, p, token)
 end
 
 regentlib.start(toplevel)
