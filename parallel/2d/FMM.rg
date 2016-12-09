@@ -386,7 +386,7 @@ do
 end
 
 task create_Ilist_new(r_boxes     : region(ispace(int2d), Box),
-                      r_boxes_par : region(ispace(int2d),Box))
+                      r_boxes_par : region(ispace(int2d), Box))
 where
   reads(r_boxes, r_boxes_par),
   writes(r_boxes.num_ilist, r_boxes.Ilist, r_boxes.ilist_imin,
@@ -413,10 +413,10 @@ do
       end
       -- Get min and max indices for interaction list partitioning
       if r_boxes_par[pn[j]].child_imin < box.ilist_imin then
-	box.ilist_imin = r_boxes[pn[j]].child_imin
+	box.ilist_imin = r_boxes_par[pn[j]].child_imin
       end
       if r_boxes_par[pn[j]].child_imax > box.ilist_imax then
-	box.ilist_imax = r_boxes[pn[j]].child_imax
+	box.ilist_imax = r_boxes_par[pn[j]].child_imax
       end
       if r_boxes_par[pn[j]].child_jmin < box.ilist_jmin then
 	box.ilist_jmin = r_boxes_par[pn[j]].child_jmin
@@ -623,7 +623,7 @@ task M2M(r_boxes       : region(ispace(int2d), Box),
          r_boxes_child : region(ispace(int2d), Box),
          p             : int64)
 where
-  reads(r_boxes, r_boxes_child.ctr, r_boxes_child.a_k), writes(r_boxes.a_k)
+  reads(r_boxes, r_boxes_child), writes(r_boxes.a_k)
 do
   
   for box in r_boxes do
@@ -632,7 +632,8 @@ do
   for k = 0, p do
     if k == 0 then
       for j = 0, box.num_child do
-        box.a_k[k] += r_boxes_child[box.Children[j]].a_k[k]
+        var a_sig = r_boxes_child[box.Children[j]].a_k[k]
+        box.a_k[k] += a_sig
       end
     else
       for j = 0, box.num_child do
@@ -716,6 +717,8 @@ do
   end
 
   end
+
+  return 1
 
 end
 
@@ -812,7 +815,7 @@ task toplevel()
   var r_particles = region(ispace(ptr, config.num_particles), Particle(wild))
 
   -- Allocate all the particles
-  new(ptr(Particle(wild), r_particles), config.num_particles)
+  new(ptr(Particle(r_boxes_leaf), r_particles), config.num_particles)
 
   -- Create partitions
   var p_colors = ispace(int1d, config.parallelism)
@@ -825,16 +828,17 @@ task toplevel()
   var xmin : Vector2d = {1e32, 1e32}
   var xmax : Vector2d = {-1e32, -1e32}
   var qmax : double = 0.0
-  for color in p_colors do
-    initialize_particles(p_boxes_part[color], p_particles[color], config.input)
-    for particle in p_particles[color] do
+  --for color in p_colors do
+  --  initialize_particles(p_boxes_part[color], p_particles[color], config.input)
+  --end
+  initialize_particles(r_boxes_leaf, r_particles, config.input)
+  for particle in r_particles do
       xmin._1 = min(xmin._1, particle.pos._1)
       xmin._2 = min(xmin._2, particle.pos._2)
       xmax._1 = max(xmax._1, particle.pos._1)
       xmax._2 = max(xmax._2, particle.pos._2)
       qmax = max(qmax, sqrt(particle.q*particle.q))
     end
-  end
   var ctr : Vector2d = 0.5*(xmin + xmax)
   var S : double = max(xmax._1 - xmin._1, xmax._2 - xmin._2)
 
@@ -866,6 +870,7 @@ task toplevel()
   end
 
   -- Create interactions list
+--  create_Ilist(r_boxes, int2d {0,0})
   for lvl = 2, num_lvl do
     create_Ilist_new(p_boxes_lvl[lvl], p_boxes_lvl[lvl-1])
   end
@@ -879,7 +884,7 @@ task toplevel()
 
   var icolor : int64 = 0
   var ileaf  : int64 = 0
-  for ilvl = 2, num_lvl + 1 do
+  for ilvl = 0, num_lvl + 1 do
     i_min = box_min[ilvl]
     i_max = box_max[ilvl]
     var r = p_boxes_lvl[ilvl]
@@ -919,7 +924,7 @@ task toplevel()
   c.legion_domain_point_coloring_destroy(c_ilist)
 
   -- Partition particles based on box at leaf level, and by neighbors
-  var p_colors_boxes = ispace(int2d, factorize(config.parallelism))
+  var p_colors_boxes = ispace(int2d, {config.parallelism,config.parallelism})
   var p_boxes_leaf = partition(equal, r_boxes_leaf, p_colors_boxes)
   var c_neighb = c.legion_domain_point_coloring_create()
   for color in p_colors_boxes do
@@ -927,7 +932,7 @@ task toplevel()
     var bounds_hi = p_boxes_leaf[color].bounds.hi+{1,1}
     c.legion_domain_point_coloring_color_domain(c_neighb, color, rect2d{bounds_lo, bounds_hi})
   end
-  var p_boxes_neighb = partition(aliased, r_boxes_leaf, c_neighb, ispace(int2d, factorize(config.parallelism)))
+  var p_boxes_neighb = partition(aliased, r_boxes_leaf, c_neighb, ispace(int2d, {config.parallelism,config.parallelism}))
   c.legion_domain_point_coloring_destroy(c_neighb)
   var p_particles_leaf = preimage(r_particles, p_boxes_leaf, r_particles.boxes)
   var p_particles_neighb = preimage(r_particles, p_boxes_neighb, r_particles.boxes)
@@ -936,6 +941,7 @@ task toplevel()
   -- Upward pass
   --
   var ts_start_up = c.legion_get_current_time_in_micros()
+  c.printf("Starting P2M\n")
 
   -- Particle to multipole
   var token : int32 = 0
@@ -946,17 +952,21 @@ task toplevel()
 --  for color in p_colors do
 --    P2M(p_boxes_part[color], p_particles[color], num_lvl, p)
 --  end
+  c.printf("P2M complete!\n")
 
   --Multipole to multipole
-  for lvl = num_lvl-1, -1, -1 do
+  c.printf("Starting M2M\n")
+  for lvl = num_lvl-1, 0, -1 do
     var r_l = p_boxes_lvl[lvl]
     var r_c = p_boxes_lvl[lvl+1]
-    var p_l = partition(equal,r_l,ispace(int2d,factorize(config.parallelism)))
-    var p_c = partition(equal,r_c,ispace(int2d,factorize(config.parallelism)))
+    var p_l = partition(equal,r_l,ispace(int2d,{config.parallelism,config.parallelism}))
+    var p_c = partition(equal,r_c,ispace(int2d,{config.parallelism,config.parallelism}))
     for color in p_l.colors do
       M2M(p_l[color], p_c[color], p)
     end
+    --M2M(r_l, r_c, p)
   end
+  c.printf("M2M complete!\n")
 
   var ts_stop_up = c.legion_get_current_time_in_micros()
   c.printf("Upward pass took %.4f sec\n", (ts_stop_up - ts_start_up) * 1e-6)
@@ -967,35 +977,41 @@ task toplevel()
   var ts_start_down = c.legion_get_current_time_in_micros()
 
   -- Multipole to local
+  c.printf("Starting M2L\n")
 --  __demand(__parallel)
   for color in p_boxes_self.colors do
     token += M2L(p_boxes_self[color], p_boxes_ilist[color], p)
   end
   wait_for(token)
+  c.printf("M2L complete!\n")
 
   -- Local to local
+  c.printf("Starting L2L\n")
   for lvl = 2, num_lvl do
     var r_l = p_boxes_lvl[lvl]
     var r_c = p_boxes_lvl[lvl+1]
-    var p_l = partition(equal,r_l,ispace(int2d,factorize(config.parallelism)))
-    var p_c = partition(equal,r_c,ispace(int2d,factorize(config.parallelism)))
+    var p_l = partition(equal,r_l,ispace(int2d,{config.parallelism,config.parallelism}))
+    var p_c = partition(equal,r_c,ispace(int2d,{config.parallelism,config.parallelism}))
     for color in p_l.colors do
       L2L(p_l[color], p_c[color], p)
     end
+    --L2L(r_l, r_c, p)
   end
+  c.printf("L2L complete!\n")
 
   -- Force evaluation
   c.printf("Evaluating forces\n")
   for color in p_boxes_leaf.colors do
     eval_forces(p_boxes_leaf[color], p_boxes_neighb[color], p_particles_neighb[color], num_lvl, box_per_dim, p)
   end
+  c.printf("Force evaluation complete!\n")
 
   var ts_stop_down = c.legion_get_current_time_in_micros()
   c.printf("Downward pass took %.4f sec\n", (ts_stop_down - ts_start_down) * 1e-6)
 
   -- Dump output
-  for color in p_boxes_leaf.colors do
-    token = dump_forces(p_boxes_leaf[color], p_particles_leaf[color], config.output, token)
+  for color in p_colors do
+    token = dump_forces(p_boxes_part[color], p_particles[color], config.output, token)
   end
 
 end
