@@ -791,7 +791,6 @@ task toplevel()
 --  var p_boxes_part = partition(equal, r_boxes_leaf, p_colors)
 --  var p_particles = preimage(r_particles, p_boxes_part, r_particles.boxes)
   var p_particles = partition(equal, r_particles, p_colors)
-  var p_boxes_part = image(r_boxes_leaf, p_particles, r_particles.boxes)
 
   -- Initialize the particles from an input file
   var xmin : Vector2d = {1e32, 1e32}
@@ -810,7 +809,7 @@ task toplevel()
       --xmax._1 = max(xmax._1, particle.pos._1)
       --xmax._2 = max(xmax._2, particle.pos._2)
       --qmax = max(qmax, sqrt(particle.q*particle.q))
-      minmax_new = get_minmax(p_boxes_part[color], p_particles[color], root_minmax)
+      minmax_new = get_minmax(r_boxes_leaf, p_particles[color], root_minmax)
       root_minmax = minmax_new
 --    end
   end
@@ -842,6 +841,8 @@ task toplevel()
     create_tree(num_lvl, r_boxes, r_boxes_leaf, p_particles[color], ctr, S)
   end
 
+--  var p_boxes_part = image(r_boxes_leaf, p_particles, r_particles.boxes)
+
   -- Create neighbors list
   for lvl = 1, num_lvl+1 do
       create_neighb(p_boxes_lvl[lvl], lvl)
@@ -866,7 +867,7 @@ task toplevel()
     i_min = box_min[ilvl]
     i_max = box_max[ilvl]
     var r = p_boxes_lvl[ilvl]
-    if ilvl < 6 then
+    if ilvl  < 5 then
       var box_min = r[{i_min,i_min}]
       var box_max = r[{i_max,i_max}]
       c.legion_domain_point_coloring_color_domain(c_self, [int1d](icolor),
@@ -875,14 +876,18 @@ task toplevel()
             rect2d{{i_min,i_min},{i_max,i_max}})
       icolor += 1
     else
-      var j_init : int64 = [int64](i_min+cmath.pow(2,6)-1)
-      var j_inc : int64 = [int64](cmath.pow(2,6))
-      for j_max = j_init, (i_max+1), j_inc do
-        for ii_max = j_init, (i_max+1), j_inc do
-          var j_min = [int64](j_max-cmath.pow(2,6)+1)
-	  var ii_min = [int64](ii_max-cmath.pow(2,6)+1)
-          --var box_min = r[{ii_min,j_min}]
-          --var box_max = r[{ii_max,j_max}]
+      var j_init : int64 = i_min
+      var j_inc : int64 = cmath.pow(2,5)
+      for j_min = j_init, i_max, j_inc do
+        for ii_min = j_init, i_max, j_inc do
+          var j_max = [int64](j_min+j_inc)
+	  var ii_max = [int64](ii_min+j_inc)
+	  if j_max > i_max then
+	    j_max = i_max
+	  end
+	  if ii_max > i_max then
+	    ii_max = i_max
+	  end
           c.legion_domain_point_coloring_color_domain(c_self, [int1d](icolor),
                rect2d{{ii_min,j_min},{ii_max,j_max}})
           var ilist_imin = ii_min-3
